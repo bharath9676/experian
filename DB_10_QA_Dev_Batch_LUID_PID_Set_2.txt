@@ -1,0 +1,371 @@
+package utils;
+
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.Hashtable;
+import java.util.List;
+import java.util.Map.Entry;
+import java.util.Properties;
+import java.util.StringTokenizer;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+import javax.mail.Message;
+import javax.mail.Multipart;
+import javax.mail.PasswordAuthentication;
+import javax.mail.Session;
+import javax.mail.Transport;
+import javax.mail.internet.InternetAddress;
+import javax.mail.internet.MimeBodyPart;
+import javax.mail.internet.MimeMessage;
+import javax.mail.internet.MimeMultipart;
+
+import org.assertj.core.api.SoftAssertions;
+import org.junit.Assert;
+import org.zeroturnaround.zip.ZipUtil;
+
+//Generic Methods which can be utilized across all the packages.
+public class Functions extends Constants {
+	static EncryptionManager encryptionManager = new EncryptionManager();
+
+	public static ArrayList<String> reportFilePreparation() {
+		String reportType=configProps.get("mail.report");
+		ArrayList<String> arrayList = new ArrayList<String>();
+			for(int i=0; i<reportType.split(",").length; i++) {
+				switch(reportType.split(",")[i].toLowerCase()){
+					case "extent" :
+						arrayList.add("target/extentReports/extent.html");
+					break;
+					
+					case "spark" :
+						arrayList.add("target/sparkReports/dashboard.html");
+					break;
+					
+					case "pdf" :
+						arrayList.add("target/sparkReports/pdf-report");
+					break;
+					
+					case "cucumber" :
+						if(new File("target/cucumber-report-html/cucumber-html-reports/").exists()) {
+							ZipUtil.pack(new File("target/cucumber-report-html/cucumber-html-reports/"), new File("target/emailReport.zip"));
+							arrayList.add("target/emailReport.zip");
+						}
+					break;
+					
+					case "log" :
+						arrayList.add("log/app.log");
+					break;
+					
+					default:
+						arrayList.add("target/extentReports/extent.html");
+						arrayList.add("log/app.log");
+						break;
+				}
+			}
+		return arrayList;
+	}
+	
+	public static void sendStatusMail() {
+		log.info("** Sending Email ** ");
+		
+		if(new File("target/cucumber-report-html/cucumber-html-reports/").exists()) 
+			ZipUtil.pack(new File("target/cucumber-report-html/cucumber-html-reports/"), new File("target/emailReport.zip"));
+		
+		configProps = readTxtFile("./config.properties");
+		reportProps.put("reportStatus", reportFlag);
+		
+		if (configProps.get("mail.send").equalsIgnoreCase("yes")) {
+			ArrayList<String> recipientList = new ArrayList<String>();
+			StringTokenizer tokens = new StringTokenizer(configProps.get("mail.to"), ",");
+			while (tokens.hasMoreTokens()) {
+				recipientList.add(tokens.nextToken().trim());
+			}
+			try {
+				Properties props = new Properties();
+				props.put("mail.smtp.host", configProps.get("mail.server"));
+				props.put("mail.smtp.auth", "true");
+
+				Session session = Session.getDefaultInstance(props, new javax.mail.Authenticator() {
+					@Override
+					protected PasswordAuthentication getPasswordAuthentication() {
+						return new PasswordAuthentication(configProps.get("mail.username"),
+								configProps.get("mail.password"));
+					}
+				});
+				session.setDebug(false);
+
+				Message msg = new MimeMessage(session);
+				InternetAddress addressFrom = new InternetAddress(configProps.get("mail.from"));
+				msg.setFrom(addressFrom);
+				InternetAddress[] addressTo = new InternetAddress[recipientList.size()];
+				for (int i = 0; i < recipientList.size(); i++) {
+					addressTo[i] = new InternetAddress(recipientList.get(i).toString());
+				}
+				msg.addRecipients(Message.RecipientType.TO, addressTo);
+				String timeDiff=printTimeDiff();
+				reportProps.put("timeDiff", timeDiff);
+				String mailBody = HTML.generateEmailBody(reportProps);
+				msg.setSubject(""+reportProps.get("reportStatus")+" : IAAS Automation Test Result "+LocalDate.now());
+				// creates message part
+				MimeBodyPart messageBodyPart = new MimeBodyPart();
+				messageBodyPart.setContent(mailBody, "text/html");
+				
+				Multipart multipart = new MimeMultipart();
+				multipart.addBodyPart(messageBodyPart);
+
+				// Add attachment
+				
+				for(String reportFile :reportFilePreparation()) {
+					MimeBodyPart attachPart = new MimeBodyPart();
+					attachPart.attachFile(reportFile);
+					multipart.addBodyPart(attachPart);
+				}
+				msg.setContent(multipart);
+				msg.setSentDate(new Date());
+				Transport t = session.getTransport("smtp");
+				t.connect(configProps.get("mail.server"), encryptionManager.deEncryptString(configProps.get("mail.username")),
+						encryptionManager.deEncryptString(configProps.get("mail.password")));
+
+				log.info("Total Duration "+timeDiff);
+				Transport.send(msg);
+			} catch (Exception e) {
+				e.printStackTrace();
+				log.info("Failed to send email.!  "+printStackTrace(e));
+			} finally {
+				// store reports
+				try {
+					log.info("writing report properties to temp file");
+					new File("tmp/reportProps.properties").delete();
+					new File("tmp/reportProps.properties").createNewFile();
+					PrintWriter printWriter = new PrintWriter(new File("tmp/reportProps.properties"));
+					for (Entry<String, String> entry : reportProps.entrySet()) {
+						String key = entry.getKey();
+						Object value = entry.getValue();
+						printWriter.write(key + "=" + value + " \n");
+					}
+					printWriter.flush();
+					printWriter.close();
+				} catch (Exception e) {
+					log.info("Failed to store report properties <> \r\n"+printStackTrace(e));
+				}
+			}
+		}
+	}
+	
+	public static Hashtable<String, String> readTxtFile(String fileName) {
+		Hashtable<String, String> insert = new Hashtable<String, String>();
+		try {
+			BufferedReader reader = new BufferedReader(new FileReader(fileName));
+			String fileData = null;
+			while ((fileData = reader.readLine()) != null) {
+				fileData = fileData.trim();
+				if (!fileData.startsWith("#") && fileData.length() > 0) {
+					String key = fileData.substring(0, fileData.indexOf('=')).trim();
+					String value = fileData.substring(fileData.indexOf('=') + 1, fileData.length()).trim();
+					insert.put(key, value);
+				}
+			}
+			reader.close();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+		return insert;
+	}
+	
+	
+	public static String ExecuteQuery(String sql) {
+		try (PreparedStatement stmt = DB_connection.prepareStatement(sql);) {
+			String result = null;
+			ResultSet resultSet = stmt.executeQuery();
+			log.info("Executing query <> "+sql);
+			if (resultSet.next()) {
+				result = resultSet.getString(1);
+				log.info("fetching result <> "+result+ "\r\n");
+			}
+			return result;
+		} catch (Exception e) {
+			log.info("Failed to execute query <> "+sql+"\r\n"+printStackTrace(e));
+			reportFlag = "FAILED";
+			return null;
+		}
+	}
+	
+	public static int ExecuteUpdate(String sql) {
+		int recs;
+		try (PreparedStatement stmt = DB_connection.prepareStatement(sql);) {
+			recs = stmt.executeUpdate();
+			log.info("Executing query <> "+sql);
+		} catch (Exception e) {
+			log.info("Failed to execute query <> "+sql+"\r\n"+printStackTrace(e));
+			reportFlag = "FAILED";
+			recs =0;
+		}
+		return recs;
+	}
+	
+	public static void dataComparision_CSV_IAAS(String sqlStatement, String sqlCountStatment, String csvFilePath) {
+//		sqlStatement ="SELECT * FROM CCIRFULL_MULTI_CLIENTB_CUSTOMER_VIEW;";
+		scenario.write("Comparing Output CSV File with Customer View table");
+		try (PreparedStatement stmt = DB_connection.prepareStatement(sqlStatement); // creating the connection
+				ResultSet rs = stmt.executeQuery();
+				BufferedReader reader = new BufferedReader(new FileReader(new File(csvFilePath)))) {
+			/*---------------------Code for comparison--------------*/
+			String rowInFile;
+			reader.readLine();
+			rowInFile = reader.readLine();
+			SoftAssertions softAssertions = new SoftAssertions();
+			int rowCounter = 1;//src/ou/mp/file.csv
+			boolean countVerification = countVerification(sqlCountStatment, csvFilePath.split("IAAS/")[1].replaceAll(".csv", "")); //if the rows counts is not matching do not proceed further
+			Assert.assertTrue("Count mistmatch",countVerification);
+			while (rs.next()) {
+				String[] rowArray = rowInFile.split(",");
+				for (int i = 1; i < rowArray.length-1; i++) {
+					try {
+						boolean match;
+						if (rowArray[i+1].equals("NULL")) {
+							match = rs.getString(i + 2) == null;
+						} else {
+							match = rowArray[i+1].equalsIgnoreCase(rs.getString(i + 2));
+						}
+						if (!match) {
+							reportFlag = "FAILED";
+							log.error("Values are different on Row number - '" + rowCounter + "' at column - '"+ i + "'.... Expected : '{"+rs.getMetaData().getColumnName(i+2)+"} " + rowArray[i+1] + "' but Found : '" + rs.getString(i + 2));
+							scenario.write("Values are different on Row number - '" + rowCounter + "' at column - '"+ i + "'.... Expected : '{"+rs.getMetaData().getColumnName(i+2)+"} " + rowArray[i+1] + "' but Found : '" + rs.getString(i + 2));
+							softAssertions.assertThat(rs.getString(i + 1)).overridingErrorMessage("Values are different on Row number - '" + rowCounter + "' at column - '" + i).isEqualTo(rowArray[i]);
+						}
+					} catch (Exception e) {
+						reportFlag = "FAILED";
+						log.error("Exception ========== At Row number - '" + rowCounter + "' at column - '" + i + "'");
+						softAssertions.assertThat(true).overridingErrorMessage("Exception ========== At Row number - '" + rowCounter + "' at column - '" + i + "'").isEqualTo(false);
+						e.printStackTrace();
+					}
+				}
+				rowInFile = reader.readLine();
+				rowCounter++;
+			}
+			log.info("\r\n");
+			softAssertions.assertAll();
+			Assert.assertEquals("Number of rows are not matching", rs.getRow(), rowCounter - 1);
+		} catch (Exception e) {
+			reportFlag = "FAILED";
+			log.error("Data Mismatch between csv file & customer view table \r\n"+printStackTrace(e));
+			scenario.write("Data Mismatch between csv file & customer view table");
+			Assert.assertTrue(false);
+		}
+	}
+	
+	
+	private static boolean countVerification(String sqlCountStatment, String csvFileName) {
+		boolean flag = false;
+		try(PreparedStatement stmt1 = DB_connection.prepareStatement(sqlCountStatment);
+				ResultSet rs1 = stmt1.executeQuery();
+				PreparedStatement stmt2 = CSV_connection.prepareStatement("SELECT COUNT(*) AS COUNT FROM OutputTables/IAAS/"+csvFileName+"");
+				ResultSet rs2 = stmt2.executeQuery()
+				){
+			if(rs1.next() && rs2.next()) {
+				flag = rs1.getString("COUNT").equals(rs2.getString("COUNT"));
+			}
+			if (!flag) {
+				log.info("Rows count is different... Expected : "+rs2.getString("COUNT")+"  but Found :" +rs1.getString("COUNT"));
+				scenario.write("Rows count is different... Expected : "+rs2.getString("COUNT")+"  but Found :" +rs1.getString("COUNT"));
+				reportFlag = "FAILED";
+			}
+			return flag;
+
+		}catch (Exception e) {
+			log.info("Failed to execute 'countVerification' method \r\n"+printStackTrace(e));
+			scenario.write("Failed to execute 'countVerification' method \r\n"+printStackTrace(e));
+			Assert.assertTrue(false);
+			return false;
+		}
+	}
+
+	@SuppressWarnings("unused")
+	private static void zipFiles(String fileName) {
+		FileOutputStream fos = null;
+		ZipOutputStream zipOut = null;
+		FileInputStream fis = null;
+		try {
+			String[] list = new File("target/cucumber-report-html/cucumber-html-reports/").list();
+			List<String> files = new ArrayList<String>();
+			for (String string : list) {
+				files.add("target/cucumber-report-html/"+string);
+			}
+			fos = new FileOutputStream(fileName);
+			zipOut = new ZipOutputStream(new BufferedOutputStream(fos));
+			for (String filePath : files) {
+				File input = new File(filePath);
+				fis = new FileInputStream(input);
+				ZipEntry ze = new ZipEntry(input.getName());
+				System.out.println("Zipping the file: " + input.getName());
+				zipOut.putNextEntry(ze);
+				byte[] tmp = new byte[4 * 1024];
+				int size = 0;
+				while ((size = fis.read(tmp)) != -1) {
+					zipOut.write(tmp, 0, size);
+				}
+				zipOut.flush();
+				fis.close();
+			}
+			zipOut.close();
+			System.out.println("Done... Zipped the files...");
+		} catch (Exception e) {
+			log.info(printStackTrace(e));
+		} finally {
+			try {
+				if (fos != null)
+					fos.close();
+			} catch (Exception e) {
+				log.info(printStackTrace(e));
+			}
+		}
+	}
+	
+	public static void printResultSet(String tableName) {
+		try (ResultSet resultSet = DB_connection.prepareStatement("SELECT * from " + tableName + " ").executeQuery();) {
+			ResultSetMetaData rsmd = resultSet.getMetaData();
+			int columnsNumber = rsmd.getColumnCount();
+			while (resultSet.next()) {
+				for (int i = 1; i <= columnsNumber; i++) {
+					if (i > 1)
+						System.out.print(",  ");
+					String columnValue = resultSet.getString(i);
+					log.info(columnValue + " " + rsmd.getColumnName(i));
+				}
+				log.info("\r\n");
+			}
+		}catch (Exception e) {
+			log.info(printStackTrace(e));
+		}
+	}
+	
+	public static String printStackTrace(Exception e) {
+		StringWriter stringWriter = new StringWriter();
+		PrintWriter printWriter = new PrintWriter(stringWriter);
+		e.printStackTrace(printWriter);
+		return stringWriter.toString();
+	}
+	
+	public static String printTimeDiff() {
+		endTime = LocalTime.now();
+	    long hours= ChronoUnit.HOURS.between(startTime, endTime);
+	    long minutes= ChronoUnit.MINUTES.between(startTime, endTime) % 60;
+	    long seconds= ChronoUnit.SECONDS.between(startTime, endTime) % 60;
+	    return "" + hours + " hours " + minutes + " minutes " + seconds + " seconds.";
+	}
+}
