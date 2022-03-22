@@ -1,0 +1,126 @@
+// Copyright - Znalytics (http://www.Znalytics.com/)
+
+package com.znalytics.eos.core;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.Properties;
+import java.util.StringTokenizer;
+import java.util.logging.Level;
+
+import javax.mail.Message;
+import javax.mail.Multipart;
+import javax.mail.PasswordAuthentication;
+import javax.mail.Session;
+import javax.mail.Transport;
+import javax.mail.internet.InternetAddress;
+import javax.mail.internet.MimeBodyPart;
+import javax.mail.internet.MimeMessage;
+import javax.mail.internet.MimeMultipart;
+
+import org.apache.commons.io.FileUtils;
+
+import com.znalytics.eos.utilities.Utils;
+
+/**
+ * The Class SendMail.
+ *
+ * @author: Nikesh Jauhari
+ * @mail: najuahri@znalytics.com
+ * @date: Mar 4, 2015
+ */
+public class SendMail {
+
+  /**
+   * Send status mail.
+   */
+  public void sendStatusMail(String message) {
+
+    if (DataSource.globalConfig.get("mail.send").equalsIgnoreCase("yes")) {
+      String currentDate = Utils.getToday();
+      Logs.LOGGER.info("Sending status mail to: " + DataSource.globalConfig.get("mail.to"));
+      Logs.LOGGER.info(Constants.SESSION_ID + ": Ending ETAS as Slave with session_ID");
+      ArrayList<String> recipientList = new ArrayList<String>();
+      StringTokenizer tokens = new StringTokenizer(DataSource.globalConfig.get("mail.to"), ",");
+      while (tokens.hasMoreTokens()) {
+        recipientList.add(tokens.nextToken().trim());
+      }
+      try {
+        Properties props = new Properties();
+        props.put("mail.smtp.host", DataSource.globalConfig.get("mail.server"));
+        props.put("mail.smtp.port", DataSource.globalConfig.get("mail.port"));
+//        props.put("mail.smtp.starttls.enable", "true");
+        props.put("mail.smtp.auth", "true");
+        Session session = Session.getDefaultInstance(props, new javax.mail.Authenticator() {
+          @Override
+          protected PasswordAuthentication getPasswordAuthentication() {
+            return new PasswordAuthentication(DataSource.globalConfig.get("mail.username"),
+                DataSource.globalConfig.get("mail.password"));
+          }
+        });
+        session.setDebug(false);
+        Message msg = new MimeMessage(session);
+        InternetAddress addressFrom = new InternetAddress(DataSource.globalConfig.get("mail.from"));
+        msg.setFrom(addressFrom);
+        InternetAddress[] addressTo = new InternetAddress[recipientList.size()];
+        for (int i = 0; i < recipientList.size(); i++) {
+          addressTo[i] = new InternetAddress(recipientList.get(i).toString());
+        }
+        msg.addRecipients(Message.RecipientType.TO, addressTo);
+        String mailBody = message;
+        String status = Constants.TESTRESULTS.contains("f") ? "[FAILED]" : "[PASSED]";
+        msg.setSubject(status + " ZnTAS Automation: " + Constants.CURRENT_TESTING + " | "
+            + DataSource.globalConfig.get("env") + " [" + currentDate + "]");
+
+        // creates message part
+        MimeBodyPart messageBodyPart = new MimeBodyPart();
+        messageBodyPart.setContent(mailBody, "text/html");
+
+        // creates multi-part
+        Multipart multipart = new MimeMultipart();
+        multipart.addBodyPart(messageBodyPart);
+
+        File logFile = new File(
+            Constants.LOGSDIR + System.getProperty("file.separator") + Constants.TMPLOGFILENAME);
+        // String sharedDrivePath = "\\\\zn-fileshare\\DevFileshare\\ETAS\\logs";
+        // File destFile = new File(sharedDrivePath + System.getProperty("file.separator")
+        // + "ETASLogs_" + Utils.getUniqueName() + ".txt");
+        // FileUtils.copyFile(logFile, destFile);
+        DataSource.attachments.add(logFile.getAbsolutePath());
+
+        // Add attachment
+        for (String filePath : DataSource.attachments) {
+          Logs.LOGGER.info("Adding file to Email attachment: " + filePath);
+          MimeBodyPart attachPart = new MimeBodyPart();
+          try {
+            attachPart.attachFile(filePath);
+          } catch (IOException ex) {
+            Logs.LOGGER.log(Level.SEVERE, "Problem in file attachment.", Utils.printStacktrace(ex));
+          }
+          multipart.addBodyPart(attachPart);
+        }
+
+        // sets the multi-part as e-mail's content
+        msg.setContent(multipart);
+        msg.setSentDate(new Date());
+        Transport t = session.getTransport("smtp");
+        t.connect(DataSource.globalConfig.get("mail.server"),
+            DataSource.globalConfig.get("mail.username"),
+            DataSource.globalConfig.get("mail.password"));
+
+        // sends the e-mail
+        Transport.send(msg);
+        Logs.LOGGER.info("Status mail sent successfully for client/tests : "
+            + Constants.CURRENT_CLIENT + " <<>> " + Constants.CURRENT_TESTING);
+        FileUtils.write(logFile, "", "UTF-8");
+      } catch (Exception e) {
+        Logs.LOGGER.log(Level.SEVERE, "Something went wrong in sending the mail.",
+            Utils.printStacktrace(e) + "\n" + Utils.stackTraceToString(e));
+      }
+    } else {
+      Logs.LOGGER.info("No configuration found for sending status mail.");
+    }
+  }
+}
